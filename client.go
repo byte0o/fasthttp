@@ -583,11 +583,11 @@ func (c *Client) hostClient(host string, isTLS bool) (*HostClient, error) {
 // "keep-alive" state. It does not interrupt any connections currently
 // in use.
 func (c *Client) CloseIdleConnections() {
-	c.m.Range(func(k, v interface{}) bool {
+	c.m.Range(func(k, v any) bool {
 		v.(*HostClient).CloseIdleConnections()
 		return true
 	})
-	c.ms.Range(func(k, v interface{}) bool {
+	c.ms.Range(func(k, v any) bool {
 		v.(*HostClient).CloseIdleConnections()
 		return true
 	})
@@ -610,7 +610,7 @@ func (c *Client) mCleaner() {
 	for {
 		time.Sleep(sleep)
 		keys := make([]string, 0)
-		c.m.Range(func(k, v interface{}) bool {
+		c.m.Range(func(k, v any) bool {
 			keys = append(keys, k.(string))
 			return true
 		})
@@ -627,7 +627,7 @@ func (c *Client) mCleaner() {
 		}
 		keys = make([]string, 0)
 		count += len(keys)
-		c.ms.Range(func(k, v interface{}) bool {
+		c.ms.Range(func(k, v any) bool {
 			keys = append(keys, k.(string))
 			return true
 		})
