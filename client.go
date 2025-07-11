@@ -219,8 +219,8 @@ type Client struct {
 	// ConfigureClient configures the fasthttp.HostClient.
 	ConfigureClient func(hc *HostClient) error
 
-	m  map[string]*HostClient
-	ms map[string]*HostClient
+	m  sync.Map
+	ms sync.Map
 
 	// Client name. Used in User-Agent request header.
 	//
@@ -285,9 +285,6 @@ type Client struct {
 	// Connection pool strategy. Can be either LIFO or FIFO (default).
 	ConnPoolStrategy ConnPoolStrategyType
 
-	mLock sync.RWMutex
-	mOnce sync.Once
-
 	// NoDefaultUserAgentHeader when set to true, causes the default
 	// User-Agent header to be excluded from the Request.
 	NoDefaultUserAgentHeader bool
@@ -330,6 +327,8 @@ type Client struct {
 
 	// StreamResponseBody enables response body streaming.
 	StreamResponseBody bool
+
+	startCleaner atomic.Bool
 }
 
 // Get returns the status code and body of url.
@@ -509,82 +508,74 @@ func (c *Client) Do(req *Request, resp *Response) error {
 		return fmt.Errorf("unsupported protocol %q. http and https are supported", uri.Scheme())
 	}
 
-	c.mOnce.Do(func() {
-		c.mLock.Lock()
-		c.m = make(map[string]*HostClient)
-		c.ms = make(map[string]*HostClient)
-		c.mLock.Unlock()
-	})
-
-	startCleaner := false
-
-	c.mLock.RLock()
-	m := c.m
-	if isTLS {
-		m = c.ms
+	hc, err := c.hostClient(string(host), isTLS)
+	if err != nil {
+		return err
 	}
-	hc := m[string(host)]
-	if hc != nil {
-		atomic.AddInt32(&hc.pendingClientRequests, 1)
-		defer atomic.AddInt32(&hc.pendingClientRequests, -1)
-	}
-	c.mLock.RUnlock()
-	if hc == nil {
-		c.mLock.Lock()
-		hc = m[string(host)]
-		if hc == nil {
-			hc = &HostClient{
-				Addr:                          AddMissingPort(string(host), isTLS),
-				Transport:                     c.Transport,
-				Name:                          c.Name,
-				NoDefaultUserAgentHeader:      c.NoDefaultUserAgentHeader,
-				Dial:                          c.Dial,
-				DialTimeout:                   c.DialTimeout,
-				DialDualStack:                 c.DialDualStack,
-				IsTLS:                         isTLS,
-				TLSConfig:                     c.TLSConfig,
-				MaxConns:                      c.MaxConnsPerHost,
-				MaxIdleConnDuration:           c.MaxIdleConnDuration,
-				MaxConnDuration:               c.MaxConnDuration,
-				MaxIdemponentCallAttempts:     c.MaxIdemponentCallAttempts,
-				ReadBufferSize:                c.ReadBufferSize,
-				WriteBufferSize:               c.WriteBufferSize,
-				ReadTimeout:                   c.ReadTimeout,
-				WriteTimeout:                  c.WriteTimeout,
-				MaxResponseBodySize:           c.MaxResponseBodySize,
-				DisableHeaderNamesNormalizing: c.DisableHeaderNamesNormalizing,
-				DisablePathNormalizing:        c.DisablePathNormalizing,
-				MaxConnWaitTimeout:            c.MaxConnWaitTimeout,
-				RetryIf:                       c.RetryIf,
-				RetryIfErr:                    c.RetryIfErr,
-				ConnPoolStrategy:              c.ConnPoolStrategy,
-				StreamResponseBody:            c.StreamResponseBody,
-				clientReaderPool:              &c.readerPool,
-				clientWriterPool:              &c.writerPool,
-			}
-
-			if c.ConfigureClient != nil {
-				if err := c.ConfigureClient(hc); err != nil {
-					c.mLock.Unlock()
-					return err
-				}
-			}
-
-			m[string(host)] = hc
-			if len(m) == 1 {
-				startCleaner = true
-			}
-		}
-		atomic.AddInt32(&hc.pendingClientRequests, 1)
-		defer atomic.AddInt32(&hc.pendingClientRequests, -1)
-		c.mLock.Unlock()
-	}
-
-	if startCleaner {
-		go c.mCleaner(m)
-	}
+	atomic.AddInt32(&hc.pendingClientRequests, 1)
+	defer atomic.AddInt32(&hc.pendingClientRequests, -1)
 
 	return hc.Do(req, resp)
+}
+
+func (c *Client) hostClient(host string, isTLS bool) (*HostClient, error) {
+	var hcc any
+	var exist bool
+	if isTLS {
+		hcc, exist = c.ms.Load(host)
+	} else {
+		hcc, exist = c.m.Load(host)
+	}
+	if hcc != nil && !exist {
+		return hcc.(*HostClient), nil
+	}
+	hcNew := &HostClient{
+		Addr:                          AddMissingPort(host, isTLS),
+		Transport:                     c.Transport,
+		Name:                          c.Name,
+		NoDefaultUserAgentHeader:      c.NoDefaultUserAgentHeader,
+		Dial:                          c.Dial,
+		DialTimeout:                   c.DialTimeout,
+		DialDualStack:                 c.DialDualStack,
+		IsTLS:                         isTLS,
+		TLSConfig:                     c.TLSConfig,
+		MaxConns:                      c.MaxConnsPerHost,
+		MaxIdleConnDuration:           c.MaxIdleConnDuration,
+		MaxConnDuration:               c.MaxConnDuration,
+		MaxIdemponentCallAttempts:     c.MaxIdemponentCallAttempts,
+		ReadBufferSize:                c.ReadBufferSize,
+		WriteBufferSize:               c.WriteBufferSize,
+		ReadTimeout:                   c.ReadTimeout,
+		WriteTimeout:                  c.WriteTimeout,
+		MaxResponseBodySize:           c.MaxResponseBodySize,
+		DisableHeaderNamesNormalizing: c.DisableHeaderNamesNormalizing,
+		DisablePathNormalizing:        c.DisablePathNormalizing,
+		MaxConnWaitTimeout:            c.MaxConnWaitTimeout,
+		RetryIf:                       c.RetryIf,
+		RetryIfErr:                    c.RetryIfErr,
+		ConnPoolStrategy:              c.ConnPoolStrategy,
+		StreamResponseBody:            c.StreamResponseBody,
+		clientReaderPool:              &c.readerPool,
+		clientWriterPool:              &c.writerPool,
+	}
+
+	if c.ConfigureClient != nil {
+		if err := c.ConfigureClient(hcNew); err != nil {
+			return nil, err
+		}
+	}
+	if isTLS {
+		hcc, exist = c.ms.LoadOrStore(host, hcNew)
+	} else {
+		hcc, exist = c.m.LoadOrStore(host, hcNew)
+	}
+	if !exist {
+		if !c.startCleaner.Load() {
+			go c.mCleaner()
+		}
+		return hcNew, nil
+	}
+	return hcc.(*HostClient), nil
 }
 
 // CloseIdleConnections closes any connections which were previously
@@ -592,19 +583,23 @@ func (c *Client) Do(req *Request, resp *Response) error {
 // "keep-alive" state. It does not interrupt any connections currently
 // in use.
 func (c *Client) CloseIdleConnections() {
-	c.mLock.RLock()
-	for _, v := range c.m {
-		v.CloseIdleConnections()
-	}
-	for _, v := range c.ms {
-		v.CloseIdleConnections()
-	}
-	c.mLock.RUnlock()
+	c.m.Range(func(k, v interface{}) bool {
+		v.(*HostClient).CloseIdleConnections()
+		return true
+	})
+	c.ms.Range(func(k, v interface{}) bool {
+		v.(*HostClient).CloseIdleConnections()
+		return true
+	})
 }
 
-func (c *Client) mCleaner(m map[string]*HostClient) {
-	mustStop := false
-
+func (c *Client) mCleaner() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("fasthttp.Client.mCleaner: ", r.(error))
+		}
+	}()
+	defer c.startCleaner.Store(false)
 	sleep := c.MaxIdleConnDuration
 	if sleep < time.Second {
 		sleep = time.Second
@@ -614,20 +609,39 @@ func (c *Client) mCleaner(m map[string]*HostClient) {
 
 	for {
 		time.Sleep(sleep)
-		c.mLock.Lock()
-		for k, v := range m {
+		keys := make([]string, 0)
+		c.m.Range(func(k, v interface{}) bool {
+			keys = append(keys, k.(string))
+			return true
+		})
+		count := len(keys)
+		for _, k := range keys {
+			vv, _ := c.m.Load(k)
+			v := vv.(*HostClient)
 			v.connsLock.Lock()
 			if v.connsCount == 0 && atomic.LoadInt32(&v.pendingClientRequests) == 0 {
-				delete(m, k)
+				c.m.Delete(k)
+				count--
 			}
 			v.connsLock.Unlock()
 		}
-		if len(m) == 0 {
-			mustStop = true
+		keys = make([]string, 0)
+		count += len(keys)
+		c.ms.Range(func(k, v interface{}) bool {
+			keys = append(keys, k.(string))
+			return true
+		})
+		for _, k := range keys {
+			vv, _ := c.m.Load(k)
+			v := vv.(*HostClient)
+			v.connsLock.Lock()
+			if v.connsCount == 0 && atomic.LoadInt32(&v.pendingClientRequests) == 0 {
+				c.ms.Delete(k)
+				count--
+			}
+			v.connsLock.Unlock()
 		}
-		c.mLock.Unlock()
-
-		if mustStop {
+		if count == 0 {
 			break
 		}
 	}

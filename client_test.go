@@ -49,17 +49,16 @@ func TestCloseIdleConnections(t *testing.T) {
 	}
 
 	connsLen := func() int {
-		c.mLock.Lock()
-		defer c.mLock.Unlock()
-
-		if _, ok := c.m["google.com"]; !ok {
+		if _, ok := c.m.Load("google.com"); !ok {
 			return 0
 		}
 
-		c.m["google.com"].connsLock.Lock()
-		defer c.m["google.com"].connsLock.Unlock()
+		v, _ := c.m.Load("google.com")
+		hc := v.(*HostClient)
+		hc.connsLock.Lock()
+		defer hc.connsLock.Unlock()
 
-		return len(c.m["google.com"].conns)
+		return len(hc.conns)
 	}
 
 	if conns := connsLen(); conns > 1 {
