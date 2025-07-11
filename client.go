@@ -625,14 +625,14 @@ func (c *Client) mCleaner() {
 			}
 			v.connsLock.Unlock()
 		}
-		keys = make([]string, 0)
+		keys = keys[:0]
 		count += len(keys)
 		c.ms.Range(func(k, v any) bool {
 			keys = append(keys, k.(string))
 			return true
 		})
 		for _, k := range keys {
-			vv, _ := c.m.Load(k)
+			vv, _ := c.ms.Load(k)
 			v := vv.(*HostClient)
 			v.connsLock.Lock()
 			if v.connsCount == 0 && atomic.LoadInt32(&v.pendingClientRequests) == 0 {
