@@ -526,7 +526,7 @@ func (c *Client) hostClient(host string, isTLS bool) (*HostClient, error) {
 	} else {
 		hcc, exist = c.m.Load(host)
 	}
-	if hcc != nil && !exist {
+	if exist && hcc != nil {
 		return hcc.(*HostClient), nil
 	}
 	hcNew := &HostClient{
